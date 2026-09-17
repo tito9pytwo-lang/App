@@ -20,28 +20,36 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # البحث عن المجلد الذي يحتوي على build.gradle.kts والعمل من داخله
       - name: Build and Sign APK
         run: |
-          # البحث عن المجلد الذي يحتوي على ملفات المشروع
-          PROJECT_DIR=$(dirname $(find . -name "settings.gradle.kts" -o -name "settings.gradle" | head -n 1))
-          echo "Working directory: $PROJECT_DIR"
-          cd "$PROJECT_DIR"
+          # البحث عن ملف settings.gradle أو settings.gradle.kts والدخول لمجلده بشكل آمن
+          SETTINGS_FILE=$(find . -name "settings.gradle.kts" -o -name "settings.gradle" | head -n 1)
+          
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "لم يتم العثور على ملف settings.gradle في المستودع!"
+            exit 1
+          fi
+
+          TARGET_DIR=$(dirname "$SETTINGS_FILE")
+          echo "Entering directory: $TARGET_DIR"
+          cd "$TARGET_DIR"
 
           # إنشاء ملفات gradle الجاهزة
           gradle wrapper
           chmod +x gradlew
 
-          # بناء المشروع
+          # بناء مشروع الـ Release
           ./gradlew assembleRelease
 
-          # توقيع الـ APK
+          # إنشاء مفتاح توقيع مؤقت
           keytool -genkeypair -v -keystore release.keystore -alias my-alias -keyalg RSA -keysize 2048 -validity 10000 -storepass mypassword -keypass mypassword -dname "CN=Android, OU=Dev, O=App, L=City, S=State, C=US"
-          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" ! -name "*-signed.apk" | head -n 1)
-          $ANDROID_HOME/build-tools/34.0.0/apksigner sign --ks release.keystore --ks-key-alias my-alias --ks-pass pass:mypassword --key-pass pass:mypassword --out app/build/outputs/apk/release/app-signed.apk $APK_PATH
 
-          # نقل الـ APK الموقّع للمجلد الرئيسي للرفع
-          cp app/build/outputs/apk/release/app-signed.apk $GITHUB_WORKSPACE/app-signed.apk
+          # توقيع ملف الـ APK
+          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" ! -name "*-signed.apk" | head -n 1)
+          $ANDROID_HOME/build-tools/34.0.0/apksigner sign --ks release.keystore --ks-key-alias my-alias --ks-pass pass:mypassword --key-pass pass:mypassword --out app/build/outputs/apk/release/app-signed.apk "$APK_PATH"
+
+          # نقل الملف الموقّع لمسار الرفع
+          cp app/build/outputs/apk/release/app-signed.apk "$GITHUB_WORKSPACE/app-signed.apk"
 
       - name: Upload Signed APK
         uses: actions/upload-artifact@v4

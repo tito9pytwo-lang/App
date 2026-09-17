@@ -11,141 +11,165 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       # ==============================
-      # 1. تحميل المستودع
+      # 1. Checkout
       # ==============================
       - name: Checkout Repository
         uses: actions/checkout@v6
 
       # ==============================
-      # 2. فك ملف ZIP
+      # 2. Find ZIP and extract it
       # ==============================
       - name: Extract Android Project
         shell: bash
         run: |
           set -e
 
-          ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -name "*.zip" | head -n 1)
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
+            -maxdepth 1 \
+            -type f \
+            -name "*.zip" \
+            -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "❌ لم يتم العثور على ملف ZIP في المستودع."
+            echo "❌ لم يتم العثور على ملف ZIP."
             exit 1
           fi
 
-          echo "📦 ZIP found:"
+          echo "📦 ZIP:"
           echo "$ZIP_FILE"
 
           mkdir -p "$GITHUB_WORKSPACE/android-project"
 
-          unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/android-project"
+          unzip -q "$ZIP_FILE" \
+            -d "$GITHUB_WORKSPACE/android-project"
 
-          echo "✅ تم فك الضغط."
-
-          echo "📂 الملفات الموجودة:"
-          find "$GITHUB_WORKSPACE/android-project" -maxdepth 3 -type f | head -100
+          echo "✅ تم فك ZIP بنجاح."
 
       # ==============================
-      # 3. العثور على جذر مشروع Android
+      # 3. Find Android project
       # ==============================
       - name: Find Android Project
         shell: bash
         run: |
           set -e
 
-          PROJECT_ROOT=$(find "$GITHUB_WORKSPACE/android-project" \
-            -type f \( \
+          PROJECT_ROOT=$(find \
+            "$GITHUB_WORKSPACE/android-project" \
+            -type f \
+            \( \
               -name "settings.gradle" \
               -o \
               -name "settings.gradle.kts" \
             \) \
-            -print -quit | xargs -r dirname)
+            -print -quit \
+            | xargs -r dirname)
 
           if [ -z "$PROJECT_ROOT" ]; then
-            echo "❌ لم يتم العثور على settings.gradle أو settings.gradle.kts"
-            echo ""
-            echo "محتويات ZIP:"
-            find "$GITHUB_WORKSPACE/android-project" -maxdepth 5 -type f
+            echo "❌ لم يتم العثور على مشروع Android."
             exit 1
           fi
 
           echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
 
-          echo "✅ Android project found:"
+          echo "✅ Project root:"
           echo "$PROJECT_ROOT"
 
       # ==============================
-      # 4. فحص أدوات GitHub المتاحة
+      # 4. Create release keystore
       # ==============================
-      - name: Detect Available Build Tools
+      - name: Create Release Keystore
         shell: bash
         run: |
           set -e
 
+          KEYSTORE="$PROJECT_ROOT/my-upload-key.jks"
+
+          echo "🔐 Creating keystore:"
+          echo "$KEYSTORE"
+
+          keytool -genkeypair \
+            -v \
+            -keystore "$KEYSTORE" \
+            -alias upload \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=Android, OU=Dev, O=App, L=City, S=State, C=US"
+
+          if [ ! -f "$KEYSTORE" ]; then
+            echo "❌ فشل إنشاء keystore."
+            exit 1
+          fi
+
+          echo "✅ Keystore created successfully."
+
+      # ==============================
+      # 5. Show Java / Gradle info
+      # ==============================
+      - name: Show Build Environment
+        shell: bash
+        run: |
           echo "=============================="
-          echo "Java"
+          echo "JAVA"
           echo "=============================="
+
           java -version || true
 
           echo ""
           echo "=============================="
-          echo "Gradle"
+          echo "GRADLE"
           echo "=============================="
+
           gradle --version || true
 
           echo ""
           echo "=============================="
-          echo "Android SDK"
+          echo "ANDROID SDK"
           echo "=============================="
+
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
-          echo ""
-          echo "=============================="
-          echo "Build Tools"
-          echo "=============================="
-
-          find "$ANDROID_HOME/build-tools" \
-            -type f \
-            -name "apksigner" \
-            -print 2>/dev/null || true
-
       # ==============================
-      # 5. بناء APK
+      # 6. Build Release
       # ==============================
       - name: Build Release APK
-        shell: bash
         working-directory: ${{ env.PROJECT_ROOT }}
+        shell: bash
         run: |
           set -e
 
-          echo "📁 Project:"
+          echo "📁 Working directory:"
           pwd
 
           echo ""
-          echo "📂 Project files:"
+          echo "📂 Project:"
           ls -la
 
-          # استخدام Gradle Wrapper إذا كان موجوداً
+          echo ""
+          echo "🔐 Checking keystore:"
+          ls -lh my-upload-key.jks
+
+          # Use Gradle Wrapper when available
           if [ -f "./gradlew" ]; then
 
-            echo "✅ Gradle Wrapper موجود."
+            echo "✅ Using Gradle Wrapper."
 
             chmod +x ./gradlew
 
             ./gradlew assembleRelease --no-daemon
 
-          elif [ -f "./gradlew.bat" ]; then
-
-            echo "❌ يوجد gradlew.bat فقط، وهذا Runner يعمل على Linux."
-            exit 1
-
           else
 
-            echo "⚠️ لا يوجد Gradle Wrapper."
-            echo "سيتم استخدام Gradle الموجود على GitHub Runner."
+            echo "⚠️ Gradle Wrapper not found."
+            echo "Using Gradle available on GitHub Runner."
 
             if ! command -v gradle >/dev/null 2>&1; then
-              echo "❌ Gradle غير موجود على Runner."
+              echo "❌ Gradle غير موجود."
               exit 1
             fi
 
@@ -154,61 +178,43 @@ jobs:
           fi
 
       # ==============================
-      # 6. العثور على APK الناتج
+      # 7. Find APK
       # ==============================
       - name: Find Release APK
         shell: bash
         run: |
           set -e
 
-          echo "🔎 البحث عن APK..."
+          echo "🔎 Searching for APK..."
 
           APK_PATH=$(find "$PROJECT_ROOT" \
             -type f \
             -path "*/build/outputs/apk/release/*.apk" \
-            ! -name "*-signed.apk" \
+            -print \
             | head -n 1)
 
           if [ -z "$APK_PATH" ]; then
-            echo "❌ لم يتم العثور على Release APK."
+            echo "❌ لم يتم العثور على APK."
 
             echo ""
-            echo "كل ملفات APK الموجودة:"
-            find "$PROJECT_ROOT" -type f -name "*.apk" || true
+            echo "APK files:"
+            find "$PROJECT_ROOT" \
+              -type f \
+              -name "*.apk" \
+              -print || true
 
             exit 1
           fi
 
           echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
 
-          echo "✅ APK:"
+          echo "✅ APK found:"
           echo "$APK_PATH"
 
       # ==============================
-      # 7. إنشاء مفتاح توقيع مؤقت
+      # 8. Verify APK
       # ==============================
-      - name: Create Temporary Signing Key
-        shell: bash
-        run: |
-          set -e
-
-          keytool -genkeypair \
-            -v \
-            -keystore "$GITHUB_WORKSPACE/release.keystore" \
-            -alias my-alias \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass mypassword \
-            -keypass mypassword \
-            -dname "CN=Android, OU=Dev, O=App, L=City, S=State, C=US"
-
-          echo "✅ تم إنشاء مفتاح التوقيع."
-
-      # ==============================
-      # 8. العثور على apksigner تلقائياً
-      # ==============================
-      - name: Find apksigner
+      - name: Verify APK
         shell: bash
         run: |
           set -e
@@ -221,55 +227,25 @@ jobs:
             | tail -n 1)
 
           if [ -z "$APKSIGNER" ]; then
-            echo "❌ لم يتم العثور على apksigner في Android SDK."
+            echo "❌ apksigner غير موجود."
             exit 1
           fi
 
-          echo "APKSIGNER=$APKSIGNER" >> "$GITHUB_ENV"
-
-          echo "✅ apksigner:"
+          echo "Using:"
           echo "$APKSIGNER"
 
-      # ==============================
-      # 9. توقيع APK
-      # ==============================
-      - name: Sign APK
-        shell: bash
-        run: |
-          set -e
-
-          SIGNED_APK="$GITHUB_WORKSPACE/app-signed.apk"
-
-          "$APKSIGNER" sign \
-            --ks "$GITHUB_WORKSPACE/release.keystore" \
-            --ks-key-alias my-alias \
-            --ks-pass pass:mypassword \
-            --key-pass pass:mypassword \
-            --out "$SIGNED_APK" \
+          "$APKSIGNER" verify \
+            --verbose \
             "$APK_PATH"
 
-          echo "SIGNED_APK=$SIGNED_APK" >> "$GITHUB_ENV"
-
-          echo "✅ تم توقيع APK."
+          echo "✅ APK signature verified."
 
       # ==============================
-      # 10. التحقق من التوقيع
-      # ==============================
-      - name: Verify APK
-        shell: bash
-        run: |
-          set -e
-
-          "$APKSIGNER" verify --verbose "$SIGNED_APK"
-
-          echo "✅ APK صالح والتوقيع تم بنجاح."
-
-      # ==============================
-      # 11. رفع APK
+      # 9. Upload APK
       # ==============================
       - name: Upload Signed APK
         uses: actions/upload-artifact@v4
         with:
           name: Signed-APK-Build-${{ github.run_number }}
-          path: ${{ env.SIGNED_APK }}
+          path: ${{ env.APK_PATH }}
           if-no-files-found: error

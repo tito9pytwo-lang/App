@@ -11,49 +11,265 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ==============================
+      # 1. تحميل المستودع
+      # ==============================
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Build and Sign APK
+      # ==============================
+      # 2. فك ملف ZIP
+      # ==============================
+      - name: Extract Android Project
+        shell: bash
         run: |
-          # البحث عن ملف settings.gradle أو settings.gradle.kts والدخول لمجلده بشكل آمن
-          SETTINGS_FILE=$(find . -name "settings.gradle.kts" -o -name "settings.gradle" | head -n 1)
-          
-          if [ -z "$SETTINGS_FILE" ]; then
-            echo "لم يتم العثور على ملف settings.gradle في المستودع!"
+          set -e
+
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -name "*.zip" | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "❌ لم يتم العثور على ملف ZIP في المستودع."
             exit 1
           fi
 
-          TARGET_DIR=$(dirname "$SETTINGS_FILE")
-          echo "Entering directory: $TARGET_DIR"
-          cd "$TARGET_DIR"
+          echo "📦 ZIP found:"
+          echo "$ZIP_FILE"
 
-          # إنشاء ملفات gradle الجاهزة
-          gradle wrapper
-          chmod +x gradlew
+          mkdir -p "$GITHUB_WORKSPACE/android-project"
 
-          # بناء مشروع الـ Release
-          ./gradlew assembleRelease
+          unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/android-project"
 
-          # إنشاء مفتاح توقيع مؤقت
-          keytool -genkeypair -v -keystore release.keystore -alias my-alias -keyalg RSA -keysize 2048 -validity 10000 -storepass mypassword -keypass mypassword -dname "CN=Android, OU=Dev, O=App, L=City, S=State, C=US"
+          echo "✅ تم فك الضغط."
 
-          # توقيع ملف الـ APK
-          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" ! -name "*-signed.apk" | head -n 1)
-          $ANDROID_HOME/build-tools/34.0.0/apksigner sign --ks release.keystore --ks-key-alias my-alias --ks-pass pass:mypassword --key-pass pass:mypassword --out app/build/outputs/apk/release/app-signed.apk "$APK_PATH"
+          echo "📂 الملفات الموجودة:"
+          find "$GITHUB_WORKSPACE/android-project" -maxdepth 3 -type f | head -100
 
-          # نقل الملف الموقّع لمسار الرفع
-          cp app/build/outputs/apk/release/app-signed.apk "$GITHUB_WORKSPACE/app-signed.apk"
+      # ==============================
+      # 3. العثور على جذر مشروع Android
+      # ==============================
+      - name: Find Android Project
+        shell: bash
+        run: |
+          set -e
 
+          PROJECT_ROOT=$(find "$GITHUB_WORKSPACE/android-project" \
+            -type f \( \
+              -name "settings.gradle" \
+              -o \
+              -name "settings.gradle.kts" \
+            \) \
+            -print -quit | xargs -r dirname)
+
+          if [ -z "$PROJECT_ROOT" ]; then
+            echo "❌ لم يتم العثور على settings.gradle أو settings.gradle.kts"
+            echo ""
+            echo "محتويات ZIP:"
+            find "$GITHUB_WORKSPACE/android-project" -maxdepth 5 -type f
+            exit 1
+          fi
+
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+
+          echo "✅ Android project found:"
+          echo "$PROJECT_ROOT"
+
+      # ==============================
+      # 4. فحص أدوات GitHub المتاحة
+      # ==============================
+      - name: Detect Available Build Tools
+        shell: bash
+        run: |
+          set -e
+
+          echo "=============================="
+          echo "Java"
+          echo "=============================="
+          java -version || true
+
+          echo ""
+          echo "=============================="
+          echo "Gradle"
+          echo "=============================="
+          gradle --version || true
+
+          echo ""
+          echo "=============================="
+          echo "Android SDK"
+          echo "=============================="
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+          echo ""
+          echo "=============================="
+          echo "Build Tools"
+          echo "=============================="
+
+          find "$ANDROID_HOME/build-tools" \
+            -type f \
+            -name "apksigner" \
+            -print 2>/dev/null || true
+
+      # ==============================
+      # 5. بناء APK
+      # ==============================
+      - name: Build Release APK
+        shell: bash
+        working-directory: ${{ env.PROJECT_ROOT }}
+        run: |
+          set -e
+
+          echo "📁 Project:"
+          pwd
+
+          echo ""
+          echo "📂 Project files:"
+          ls -la
+
+          # استخدام Gradle Wrapper إذا كان موجوداً
+          if [ -f "./gradlew" ]; then
+
+            echo "✅ Gradle Wrapper موجود."
+
+            chmod +x ./gradlew
+
+            ./gradlew assembleRelease --no-daemon
+
+          elif [ -f "./gradlew.bat" ]; then
+
+            echo "❌ يوجد gradlew.bat فقط، وهذا Runner يعمل على Linux."
+            exit 1
+
+          else
+
+            echo "⚠️ لا يوجد Gradle Wrapper."
+            echo "سيتم استخدام Gradle الموجود على GitHub Runner."
+
+            if ! command -v gradle >/dev/null 2>&1; then
+              echo "❌ Gradle غير موجود على Runner."
+              exit 1
+            fi
+
+            gradle assembleRelease --no-daemon
+
+          fi
+
+      # ==============================
+      # 6. العثور على APK الناتج
+      # ==============================
+      - name: Find Release APK
+        shell: bash
+        run: |
+          set -e
+
+          echo "🔎 البحث عن APK..."
+
+          APK_PATH=$(find "$PROJECT_ROOT" \
+            -type f \
+            -path "*/build/outputs/apk/release/*.apk" \
+            ! -name "*-signed.apk" \
+            | head -n 1)
+
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ لم يتم العثور على Release APK."
+
+            echo ""
+            echo "كل ملفات APK الموجودة:"
+            find "$PROJECT_ROOT" -type f -name "*.apk" || true
+
+            exit 1
+          fi
+
+          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
+
+          echo "✅ APK:"
+          echo "$APK_PATH"
+
+      # ==============================
+      # 7. إنشاء مفتاح توقيع مؤقت
+      # ==============================
+      - name: Create Temporary Signing Key
+        shell: bash
+        run: |
+          set -e
+
+          keytool -genkeypair \
+            -v \
+            -keystore "$GITHUB_WORKSPACE/release.keystore" \
+            -alias my-alias \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass mypassword \
+            -keypass mypassword \
+            -dname "CN=Android, OU=Dev, O=App, L=City, S=State, C=US"
+
+          echo "✅ تم إنشاء مفتاح التوقيع."
+
+      # ==============================
+      # 8. العثور على apksigner تلقائياً
+      # ==============================
+      - name: Find apksigner
+        shell: bash
+        run: |
+          set -e
+
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" \
+            -type f \
+            -name "apksigner" \
+            -print \
+            | sort -V \
+            | tail -n 1)
+
+          if [ -z "$APKSIGNER" ]; then
+            echo "❌ لم يتم العثور على apksigner في Android SDK."
+            exit 1
+          fi
+
+          echo "APKSIGNER=$APKSIGNER" >> "$GITHUB_ENV"
+
+          echo "✅ apksigner:"
+          echo "$APKSIGNER"
+
+      # ==============================
+      # 9. توقيع APK
+      # ==============================
+      - name: Sign APK
+        shell: bash
+        run: |
+          set -e
+
+          SIGNED_APK="$GITHUB_WORKSPACE/app-signed.apk"
+
+          "$APKSIGNER" sign \
+            --ks "$GITHUB_WORKSPACE/release.keystore" \
+            --ks-key-alias my-alias \
+            --ks-pass pass:mypassword \
+            --key-pass pass:mypassword \
+            --out "$SIGNED_APK" \
+            "$APK_PATH"
+
+          echo "SIGNED_APK=$SIGNED_APK" >> "$GITHUB_ENV"
+
+          echo "✅ تم توقيع APK."
+
+      # ==============================
+      # 10. التحقق من التوقيع
+      # ==============================
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -e
+
+          "$APKSIGNER" verify --verbose "$SIGNED_APK"
+
+          echo "✅ APK صالح والتوقيع تم بنجاح."
+
+      # ==============================
+      # 11. رفع APK
+      # ==============================
       - name: Upload Signed APK
         uses: actions/upload-artifact@v4
         with:
           name: Signed-APK-Build-${{ github.run_number }}
-          path: app-signed.apk
-          
+          path: ${{ env.SIGNED_APK }}
+          if-no-files-found: error

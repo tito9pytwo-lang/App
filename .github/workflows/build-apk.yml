@@ -1,21 +1,21 @@
 name: Build & Sign Android APK
 
 on:
-  workflow_dispatch: # تشغيل يدوياً وقتما تشاء
+  workflow_dispatch:
   push:
     branches:
-      - main # تشغيل تلقائياً عند رفع أي تحديث جديد
+      - main
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. جلب أحدث نسخة من الكود عند كل تحديث
+      # 1. جلب الكود من المستودع
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. إعداد بيئة Java JDK 17
+      # 2. إعداد بيئة Java
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -23,27 +23,24 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      # 3. إعطاء صلاحيات التشغيل
+      # 3. منح صلاحية التشغيل لـ Gradle
       - name: Grant Execute Permission for Gradle
         run: chmod +x gradlew
 
-      # 4. بناء ملف APK للتحديث الجديد
+      # 4. بناء ملف الـ APK
       - name: Build Release APK
         run: ./gradlew assembleRelease
 
-      # 5. توقيع الـ APK الناتج
-      - name: Sign APK with Auto-Generated Key
-        uses: rpx0/autosign-action@v1
-        with:
-          releaseDir: 'app/build/outputs/apk/release'
-          keyAlias: 'my-key-alias'
-          keyPassword: 'MyPassword123'
-          storePassword: 'MyPassword123'
+      # 5. إنشاء مفتاح توقيع مؤقت وتوقيع ملف الـ APK
+      - name: Sign APK File
+        run: |
+          keytool -genkeypair -v -keystore release.keystore -alias my-alias -keyalg RSA -keysize 2048 -validity 10000 -storepass mypassword -keypass mypassword -dname "CN=Android, OU=Dev, O=App, L=City, S=State, C=US"
+          $ANDROID_HOME/build-tools/34.0.0/apksigner sign --ks release.keystore --ks-key-alias my-alias --ks-pass pass:mypassword --key-pass pass:mypassword --out app/build/outputs/apk/release/app-signed.apk app/build/outputs/apk/release/*.apk
 
-      # 6. رفع الـ APK وتسميته باسم التحديث والرقم لتمييزه
+      # 6. رفع ملف الـ APK الموقّع للتحميل
       - name: Upload Signed APK
         uses: actions/upload-artifact@v4
         with:
           name: Signed-APK-Build-${{ github.run_number }}
-          path: app/build/outputs/apk/release/*-signed.apk
+          path: app/build/outputs/apk/release/app-signed.apk
           

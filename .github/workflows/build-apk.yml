@@ -2,9 +2,13 @@ name: Build & Sign Android APK
 
 on:
   workflow_dispatch:
+
   push:
     branches:
       - main
+    paths:
+      - '**.zip'
+      - '**.ZIP'
 
 jobs:
   build:
@@ -13,81 +17,148 @@ jobs:
     steps:
 
       # ==========================================
-      # 1. تحميل آخر نسخة من المستودع
+      # 1. تحميل المستودع بالكامل
       # ==========================================
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # ==========================================
-      # 2. البحث عن أحدث Android Project ZIP
-      #
-      # يقبل:
-      # android-project.zip
-      # android-project1.zip
-      # android-project2.zip
-      # android-project3.zip
-      # ...
+      # 2. إعداد Java
       # ==========================================
-      - name: Extract Latest Android Project
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ==========================================
+      # 3. البحث عن أحدث ZIP تم رفعه/تعديله
+      #
+      # لا يعتمد على اسم ZIP إطلاقاً.
+      #
+      # مثال:
+      #
+      # old_project.zip
+      # myapp_2026.zip
+      # test-final.zip
+      # مشروع جديد.zip
+      #
+      # سيتم اختيار الملف الذي كان آخر
+      # ملف ZIP تم تغييره في Git.
+      # ==========================================
+      - name: Find Newest Uploaded ZIP
         shell: bash
         run: |
           set -e
 
-          echo "================================"
-          echo "البحث عن أحدث ملف Android Project"
-          echo "================================"
+          echo "=========================================="
+          echo "🔎 البحث عن أحدث ملف ZIP"
+          echo "=========================================="
 
-          ZIP_FILE=$(
+          ZIP_FILE=""
+
+          LATEST_TIME=0
+
+          # البحث عن جميع ملفات ZIP في المستودع
+          while IFS= read -r -d '' FILE; do
+
+            # الحصول على وقت آخر Commit غيّر هذا الملف
+            FILE_TIME=$(git log \
+              -1 \
+              --format=%ct \
+              -- "$FILE" || true)
+
+            if [ -z "$FILE_TIME" ]; then
+              continue
+            fi
+
+            echo "📦 ZIP: $FILE"
+            echo "   آخر تعديل Git: $FILE_TIME"
+
+            if [ "$FILE_TIME" -gt "$LATEST_TIME" ]; then
+              LATEST_TIME="$FILE_TIME"
+              ZIP_FILE="$FILE"
+            fi
+
+          done < <(
             find "$GITHUB_WORKSPACE" \
-              -maxdepth 1 \
               -type f \
-              -regextype posix-extended \
-              -regex '.*/android-project[0-9]*\.zip' \
-              -printf '%T@ %p\n' \
-            | sort -nr \
-            | head -n 1 \
-            | cut -d' ' -f2-
+              \( -iname "*.zip" \) \
+              -not -path "*/.git/*" \
+              -print0
           )
 
+          echo ""
+          echo "=========================================="
+
           if [ -z "$ZIP_FILE" ]; then
-            echo "❌ لم يتم العثور على ملف:"
-            echo "android-project.zip"
-            echo "أو android-project1.zip"
-            echo "أو android-project2.zip ..."
+            echo "❌ لم يتم العثور على أي ملف ZIP."
             exit 1
           fi
 
-          echo ""
-          echo "📦 سيتم استخدام:"
+          echo "✅ أحدث ZIP:"
           echo "$ZIP_FILE"
 
-          # حذف أي مشروع قديم
+          echo "=========================================="
+
+          # حفظ المسار لباقي الخطوات
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+
+      # ==========================================
+      # 4. فك ضغط أحدث ZIP
+      # ==========================================
+      - name: Extract Newest Android Project
+        shell: bash
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "📦 فك ضغط المشروع الجديد"
+          echo "=========================================="
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "❌ ملف ZIP غير موجود:"
+            echo "$ZIP_FILE"
+            exit 1
+          fi
+
+          # حذف أي مشروع مستخرج سابقاً
           rm -rf "$GITHUB_WORKSPACE/android-project"
 
           # إنشاء مجلد نظيف
           mkdir -p "$GITHUB_WORKSPACE/android-project"
 
-          # فك ضغط أحدث ZIP
-          unzip -q "$ZIP_FILE" \
+          echo "ZIP:"
+          echo "$ZIP_FILE"
+
+          echo ""
+
+          unzip -q \
+            "$ZIP_FILE" \
             -d "$GITHUB_WORKSPACE/android-project"
 
-          echo ""
-          echo "✅ تم فك أحدث ZIP بنجاح."
+          echo "✅ تم فك الضغط بنجاح."
 
           echo ""
-          echo "📂 الملفات:"
+          echo "📂 محتويات ZIP:"
           find "$GITHUB_WORKSPACE/android-project" \
-            -maxdepth 4 \
+            -maxdepth 5 \
             -type f \
             -print
 
       # ==========================================
-      # 3. العثور على مشروع Android
+      # 5. العثور على مشروع Android
       # ==========================================
       - name: Find Android Project
         shell: bash
         run: |
           set -e
+
+          echo "=========================================="
+          echo "🔎 البحث عن مشروع Android"
+          echo "=========================================="
 
           PROJECT_ROOT=$(
             find "$GITHUB_WORKSPACE/android-project" \
@@ -102,12 +173,14 @@ jobs:
           )
 
           if [ -z "$PROJECT_ROOT" ]; then
+
             echo "❌ لم يتم العثور على:"
             echo "settings.gradle"
-            echo "أو settings.gradle.kts"
+            echo "أو"
+            echo "settings.gradle.kts"
 
             echo ""
-            echo "محتويات المشروع:"
+            echo "📂 محتويات المشروع:"
             find "$GITHUB_WORKSPACE/android-project" \
               -maxdepth 6 \
               -type f \
@@ -123,16 +196,7 @@ jobs:
           echo "$PROJECT_ROOT"
 
       # ==========================================
-      # 4. إعداد Java
-      # ==========================================
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      # ==========================================
-      # 5. التحقق من Gradle Wrapper
+      # 6. فحص Gradle Wrapper
       # ==========================================
       - name: Check Gradle
         working-directory: ${{ env.PROJECT_ROOT }}
@@ -140,51 +204,50 @@ jobs:
         run: |
           set -e
 
-          echo "================================"
-          echo "Gradle"
-          echo "================================"
+          echo "=========================================="
+          echo "⚙️ فحص Gradle"
+          echo "=========================================="
 
           if [ -f "./gradlew" ]; then
-            echo "✅ Gradle Wrapper موجود"
+
+            echo "✅ Gradle Wrapper موجود."
 
             chmod +x ./gradlew
 
             ./gradlew --version
 
           else
+
             echo "⚠️ Gradle Wrapper غير موجود."
 
-            if command -v gradle >/dev/null 2>&1; then
-              echo "✅ سيتم استخدام Gradle الموجود في GitHub Runner"
-              gradle --version
-            else
+            if ! command -v gradle >/dev/null 2>&1; then
               echo "❌ Gradle غير موجود."
               exit 1
             fi
+
+            echo "✅ سيتم استخدام Gradle الموجود في Runner."
+
+            gradle --version
+
           fi
 
       # ==========================================
-      # 6. البحث عن Keystore
-      #
-      # إذا كان المشروع يحتوي على my-upload-key.jks
-      # سيتم استخدامه.
-      #
-      # إذا لم يكن موجوداً سيتم إنشاء واحد.
-      #
-      # ملاحظة:
-      # الأفضل لاحقاً نقل المفتاح إلى GitHub Secrets.
+      # 7. إنشاء Keystore
       # ==========================================
-      - name: Prepare Release Keystore
-        working-directory: ${{ env.PROJECT_ROOT }}
+      - name: Create Release Keystore
         shell: bash
         run: |
           set -e
 
           KEYSTORE="$PROJECT_ROOT/my-upload-key.jks"
 
+          echo "=========================================="
+          echo "🔐 إعداد Keystore"
+          echo "=========================================="
+
           if [ -f "$KEYSTORE" ]; then
 
-            echo "✅ تم العثور على Keystore موجود."
+            echo "✅ Keystore موجود داخل المشروع."
 
           else
 
@@ -205,7 +268,7 @@ jobs:
           fi
 
           if [ ! -f "$KEYSTORE" ]; then
-            echo "❌ لم يتم إنشاء Keystore."
+            echo "❌ فشل إعداد Keystore."
             exit 1
           fi
 
@@ -214,38 +277,46 @@ jobs:
           echo "✅ Keystore جاهز."
 
       # ==========================================
-      # 7. عرض بيئة البناء
+      # 8. عرض بيئة البناء
       # ==========================================
       - name: Show Build Environment
         shell: bash
         run: |
-          echo "================================"
-          echo "Java"
-          echo "================================"
+          echo "=========================================="
+          echo "☕ Java"
+          echo "=========================================="
 
           java -version
 
           echo ""
-          echo "================================"
-          echo "Android SDK"
-          echo "================================"
+          echo "=========================================="
+          echo "📱 Android SDK"
+          echo "=========================================="
 
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
           echo ""
-          echo "================================"
-          echo "Project"
-          echo "================================"
+          echo "=========================================="
+          echo "📦 ZIP المستخدم"
+          echo "=========================================="
+
+          echo "$ZIP_FILE"
+
+          echo ""
+          echo "=========================================="
+          echo "📂 المشروع"
+          echo "=========================================="
 
           echo "$PROJECT_ROOT"
 
       # ==========================================
-      # 8. بناء Release APK
+      # 9. بناء Release APK
       # ==========================================
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_ROOT }}
         shell: bash
+
         env:
           KEYSTORE_PATH: ${{ env.KEYSTORE_PATH }}
           STORE_PASSWORD: android
@@ -255,17 +326,18 @@ jobs:
         run: |
           set -e
 
-          echo "================================"
-          echo "Building Release APK"
-          echo "================================"
+          echo "=========================================="
+          echo "🔨 بناء Release APK"
+          echo "=========================================="
 
           pwd
 
           echo ""
-          echo "📂 محتويات المشروع:"
+          echo "📂 ملفات المشروع:"
           ls -la
 
           echo ""
+          echo "=========================================="
 
           if [ -f "./gradlew" ]; then
 
@@ -284,17 +356,21 @@ jobs:
           fi
 
           echo ""
-          echo "✅ انتهى بناء APK."
+          echo "=========================================="
+          echo "✅ انتهى البناء"
+          echo "=========================================="
 
       # ==========================================
-      # 9. العثور على APK الناتج
+      # 10. البحث عن APK الناتج
       # ==========================================
       - name: Find Release APK
         shell: bash
         run: |
           set -e
 
-          echo "🔎 البحث عن APK..."
+          echo "=========================================="
+          echo "🔎 البحث عن APK"
+          echo "=========================================="
 
           APK_PATH=$(
             find "$PROJECT_ROOT" \
@@ -309,7 +385,8 @@ jobs:
             echo "❌ لم يتم العثور على APK."
 
             echo ""
-            echo "كل ملفات APK:"
+            echo "📂 كل ملفات APK الموجودة:"
+            
             find "$PROJECT_ROOT" \
               -type f \
               -name "*.apk" \
@@ -325,12 +402,16 @@ jobs:
           echo "$APK_PATH"
 
       # ==========================================
-      # 10. العثور على apksigner
+      # 11. العثور على apksigner
       # ==========================================
       - name: Find apksigner
         shell: bash
         run: |
           set -e
+
+          echo "=========================================="
+          echo "🔎 البحث عن apksigner"
+          echo "=========================================="
 
           APKSIGNER=$(
             find "$ANDROID_HOME/build-tools" \
@@ -348,50 +429,58 @@ jobs:
 
           echo "APKSIGNER=$APKSIGNER" >> "$GITHUB_ENV"
 
+          echo ""
           echo "✅ apksigner:"
           echo "$APKSIGNER"
 
       # ==========================================
-      # 11. التحقق من APK
+      # 12. التحقق من APK
       # ==========================================
       - name: Verify APK
         shell: bash
         run: |
           set -e
 
+          echo "=========================================="
+          echo "🔐 التحقق من APK"
+          echo "=========================================="
+
           "$APKSIGNER" verify \
             --verbose \
             "$APK_PATH"
 
           echo ""
-          echo "✅ APK صالح والتوقيع صحيح."
+          echo "✅ APK صالح."
 
       # ==========================================
-      # 12. إعادة تسمية APK
+      # 13. تجهيز ملف APK النهائي
       # ==========================================
-      - name: Rename APK
+      - name: Prepare Final APK
         shell: bash
         run: |
           set -e
 
           mkdir -p "$GITHUB_WORKSPACE/output"
 
-          NEW_APK="$GITHUB_WORKSPACE/output/app-release-${{ github.run_number }}.apk"
+          FINAL_APK="$GITHUB_WORKSPACE/output/app-release-${GITHUB_RUN_NUMBER}.apk"
 
-          cp "$APK_PATH" "$NEW_APK"
+          cp "$APK_PATH" "$FINAL_APK"
 
-          echo "FINAL_APK=$NEW_APK" >> "$GITHUB_ENV"
+          echo "FINAL_APK=$FINAL_APK" >> "$GITHUB_ENV"
 
           echo ""
-          echo "✅ APK النهائي:"
-          echo "$NEW_APK"
+          echo "=========================================="
+          echo "✅ APK النهائي"
+          echo "=========================================="
+
+          echo "$FINAL_APK"
 
       # ==========================================
-      # 13. رفع APK
+      # 14. رفع APK كـ Artifact
       # ==========================================
       - name: Upload Signed APK
         uses: actions/upload-artifact@v4
         with:
-          name: Android-APK-Build-${{ github.run_number }}
+          name: Signed-APK-Build-${{ github.run_number }}
           path: ${{ env.FINAL_APK }}
           if-no-files-found: error

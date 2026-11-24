@@ -232,49 +232,31 @@ jobs:
           fi
 
       # ==========================================
-      # 7. إنشاء Keystore
+      # 7. إعداد Keystore ثابت من GitHub Secrets
       # ==========================================
-      - name: Create Release Keystore
+      - name: Restore Permanent Release Keystore
         shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          set -e
+          set -euo pipefail
 
-          KEYSTORE="$PROJECT_ROOT/my-upload-key.jks"
-
-          echo "=========================================="
-          echo "🔐 إعداد Keystore"
-          echo "=========================================="
-
-          if [ -f "$KEYSTORE" ]; then
-
-            echo "✅ Keystore موجود داخل المشروع."
-
-          else
-
-            echo "⚠️ لم يتم العثور على Keystore."
-            echo "🔐 سيتم إنشاء Keystore جديد."
-
-            keytool -genkeypair \
-              -v \
-              -keystore "$KEYSTORE" \
-              -alias upload \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -storepass android \
-              -keypass android \
-              -dname "CN=Android, OU=Dev, O=App, L=City, S=State, C=US"
-
-          fi
-
-          if [ ! -f "$KEYSTORE" ]; then
-            echo "❌ فشل إعداد Keystore."
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "❌ أضف ANDROID_KEYSTORE_BASE64 إلى GitHub Secrets أولاً."
             exit 1
           fi
 
-          echo "KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
+          KEYSTORE_PATH="$RUNNER_TEMP/capsule-release-key.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          chmod 600 "$KEYSTORE_PATH"
 
-          echo "✅ Keystore جاهز."
+          if [ ! -s "$KEYSTORE_PATH" ]; then
+            echo "❌ ملف Keystore غير صالح أو فارغ."
+            exit 1
+          fi
+
+          echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          echo "✅ تم استعادة مفتاح التوقيع الثابت."
 
       # ==========================================
       # 8. عرض بيئة البناء
@@ -316,12 +298,6 @@ jobs:
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_ROOT }}
         shell: bash
-
-        env:
-          KEYSTORE_PATH: ${{ env.KEYSTORE_PATH }}
-          STORE_PASSWORD: android
-          KEY_ALIAS: upload
-          KEY_PASSWORD: android
 
         run: |
           set -e
@@ -434,23 +410,47 @@ jobs:
           echo "$APKSIGNER"
 
       # ==========================================
-      # 12. التحقق من APK
+      # 12. محاذاة APK وتوقيعه بالمفتاح الثابت
       # ==========================================
-      - name: Verify APK
+      - name: Align and Sign APK
         shell: bash
+        env:
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "=========================================="
-          echo "🔐 التحقق من APK"
-          echo "=========================================="
+          for VAR in STORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!VAR:-}" ]; then
+              echo "❌ GitHub Secret مفقود: $VAR"
+              exit 1
+            fi
+          done
 
-          "$APKSIGNER" verify \
-            --verbose \
-            "$APK_PATH"
+          BUILD_TOOLS_DIR="$(dirname "$APKSIGNER")"
+          ZIPALIGN="$BUILD_TOOLS_DIR/zipalign"
+          SIGNED_APK="$GITHUB_WORKSPACE/output/app-release-signed.apk"
+          mkdir -p "$GITHUB_WORKSPACE/output"
 
-          echo ""
-          echo "✅ APK صالح."
+          if [ ! -x "$ZIPALIGN" ]; then
+            echo "❌ لم يتم العثور على zipalign."
+            exit 1
+          fi
+
+          "$ZIPALIGN" -f -v 4 "$APK_PATH" "$GITHUB_WORKSPACE/output/app-release-aligned.apk"
+
+          "$APKSIGNER" sign \
+            --ks "$KEYSTORE_PATH" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:STORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD \
+            --out "$SIGNED_APK" \
+            "$GITHUB_WORKSPACE/output/app-release-aligned.apk"
+
+          "$APKSIGNER" verify --verbose "$SIGNED_APK"
+          echo "SIGNED_APK=$SIGNED_APK" >> "$GITHUB_ENV"
+          echo "✅ تم توقيع APK والتحقق منه بالمفتاح الثابت."
 
       # ==========================================
       # 13. تجهيز ملف APK النهائي
@@ -464,7 +464,7 @@ jobs:
 
           FINAL_APK="$GITHUB_WORKSPACE/output/app-release-${GITHUB_RUN_NUMBER}.apk"
 
-          cp "$APK_PATH" "$FINAL_APK"
+          cp "$SIGNED_APK" "$FINAL_APK"
 
           echo "FINAL_APK=$FINAL_APK" >> "$GITHUB_ENV"
 

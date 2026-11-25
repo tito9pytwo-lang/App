@@ -196,6 +196,36 @@ jobs:
           echo "$PROJECT_ROOT"
 
       # ==========================================
+      # 6. تعديل إعداد alias تلقائياً ليتوافق مع مفتاح GitHub
+      # ==========================================
+      - name: Configure Gradle Signing Alias
+        working-directory: ${{ env.PROJECT_ROOT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+
+          candidates = [Path("app/build.gradle.kts")]
+          gradle_file = next((p for p in candidates if p.is_file()), None)
+          if gradle_file is None:
+              raise SystemExit("❌ لم يتم العثور على app/build.gradle.kts")
+
+          source = gradle_file.read_text()
+          updated, count = re.subn(
+              r'keyAlias\s*=\s*"upload"',
+              'keyAlias = System.getenv("KEY_ALIAS") ?: "capsule"',
+              source,
+              count=1,
+          )
+          if count == 0 and 'keyAlias = System.getenv("KEY_ALIAS")' not in source:
+              raise SystemExit("❌ لم يتم العثور على سطر keyAlias المتوقع؛ أوقفنا البناء دون تغيير الملف.")
+          gradle_file.write_text(updated)
+          print("✅ تم إعداد Gradle لاستخدام KEY_ALIAS من GitHub Secrets.")
+          PYCODE
+
+      # ==========================================
       # 6. فحص Gradle Wrapper
       # ==========================================
       - name: Check Gradle
@@ -298,7 +328,11 @@ jobs:
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_ROOT }}
         shell: bash
-
+        env:
+          KEYSTORE_PATH: ${{ env.KEYSTORE_PATH }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
           set -e
 
@@ -484,3 +518,4 @@ jobs:
           name: Signed-APK-Build-${{ github.run_number }}
           path: ${{ env.FINAL_APK }}
           if-no-files-found: error
+          
